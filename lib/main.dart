@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -149,6 +150,11 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _copy(ClipItem item) async {
     await Clipboard.setData(ClipboardData(text: item.text));
+    // On Linux terminals, Ctrl+Shift+V may paste from the PRIMARY selection.
+    // Keep both CLIPBOARD and PRIMARY in sync to ensure consistent pasting.
+    if (Platform.isLinux) {
+      await _syncLinuxSelections(item.text);
+    }
     setState(() {
       _copied.add(item.id);
     });
@@ -211,6 +217,44 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+  }
+}
+
+// Keep Linux PRIMARY selection in sync with the regular clipboard so pasting in
+// terminals (Ctrl+Shift+V / Shift+Insert depending on emulator) uses the same content.
+Future<void> _syncLinuxSelections(String text) async {
+  final bytes = utf8.encode(text);
+
+  Future<bool> tryProgram(String executable, List<String> args) async {
+    try {
+      final process = await Process.start(executable, args);
+      process.stdin.add(bytes);
+      await process.stdin.close();
+      final exit = await process.exitCode;
+      return exit == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Wayland first
+  final wlOk = await tryProgram('wl-copy', []);
+  if (wlOk) {
+    // Also set primary selection
+    await tryProgram('wl-copy', ['--primary']);
+    return;
+  }
+
+  // X11 fallbacks
+  final xclipClipboardOk = await tryProgram('xclip', ['-selection', 'clipboard']);
+  if (xclipClipboardOk) {
+    await tryProgram('xclip', ['-selection', 'primary']);
+    return;
+  }
+
+  final xselClipboardOk = await tryProgram('xsel', ['--clipboard', '--input']);
+  if (xselClipboardOk) {
+    await tryProgram('xsel', ['--primary', '--input']);
   }
 }
 
